@@ -2,14 +2,15 @@ extern crate sha2;
 extern crate chrono;
 use sha2::{Sha512, Digest};
 use chrono::prelude::*;
+use std::fmt;
 
 pub type Sha512Hash = Vec<u8>;
 
 trait BlockData {
     fn data(&self) -> Vec<u8>;
     fn box_clone(&self) -> Box<BlockData>;
+    fn debug(&self, f: &mut fmt::Formatter)-> fmt::Result;
 }
-
 
 impl Clone for Box<BlockData> {
     fn clone(&self) -> Box<BlockData> {
@@ -17,6 +18,13 @@ impl Clone for Box<BlockData> {
     }
 }
 
+impl fmt::Debug for Box<BlockData> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.debug(f)
+    }
+}
+
+#[derive(Debug)]
 struct Block {
     id: u64,
     timestamp: i64,
@@ -61,6 +69,12 @@ impl Block {
         Self::new(&vec![BinaryData::new(&b"Genesis block".to_vec()).box_clone()],
                   Sha512Hash::default(), 0)
     }
+
+    fn next_block(&self) -> Self {
+        let next_block = self.id + 1;
+        Self::new(&vec![BinaryData::new(&format!("Block {}", next_block).as_bytes().to_vec()).box_clone()],
+                  self.hash(), next_block)
+    }
 }
 
 pub fn convert_u64_to_u8_array(val: u64) -> [u8; 8] {
@@ -76,7 +90,7 @@ pub fn convert_u64_to_u8_array(val: u64) -> [u8; 8] {
     ]
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Transaction {
     sender: u64,
     recipient: u64,
@@ -96,9 +110,12 @@ impl BlockData for Transaction {
     fn box_clone(&self) -> Box<BlockData> {
         Box::new((*self).clone())
     }
+    fn debug(&self, f: &mut fmt::Formatter)-> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct BinaryData {
     data: Vec<u8>
 }
@@ -122,9 +139,13 @@ impl BlockData for BinaryData {
     fn box_clone(&self) -> Box<BlockData> {
         Box::new((*self).clone())
     }
+    fn debug(&self, f: &mut fmt::Formatter)-> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
-pub struct Blockchain {
+#[derive(Debug)]
+struct Blockchain {
     blocks: Vec<Block>,
 }
 
@@ -137,8 +158,16 @@ impl Blockchain {
             blocks: vec![blocks]
         }
     }
+
+    fn add_block(&self) {
+        let block: Block;
+        let last_block = self.blocks.last();
+        let block = last_block.next_block();
+        self.blocks.push(block);
+    }
 }
 
 fn main() {
-    println!("#BongoCatCoin");
+    let chain = Blockchain::new();
+    println!("{:?}", chain);
 }
