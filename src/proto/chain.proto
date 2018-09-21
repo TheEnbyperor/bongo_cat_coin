@@ -1,0 +1,30 @@
+syntax = "proto2";
+
+message Transaction {
+  required bytes from = 1;
+  required bytes to = 2;
+  required uint64 amount = 3;
+}
+
+message BinaryData {
+  required bytes data = 1;
+}
+
+message Block {
+  enum DataType {
+    BINARY_DATA = 0;
+    TRANSACTION = 1;
+  }
+
+  message Data {
+    required DataType type = 1;
+    optional Transaction transaction = 2;
+    optional BinaryData binaryData = 3;
+  }
+
+  required uint64 id = 1;
+  required int64 timestamp = 2;
+  required uint64 nonce = 3;
+  required bytes prev_block_hash = 4;
+  repeated Data data = 5;
+}
