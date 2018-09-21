@@ -1,16 +1,29 @@
-extern crate sha2;
 extern crate chrono;
-use sha2::{Sha512, Digest};
+extern crate crypto;
+#[macro_use]
+extern crate juniper;
+extern crate juniper_warp;
+extern crate warp;
+use warp::Filter;
+use crypto::sha2::Sha256;
+use crypto::digest::Digest;
 use chrono::prelude::*;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
-pub type Sha512Hash = Vec<u8>;
+pub type Sha256Hash = [u8; 32];
 
-trait BlockData {
+trait BlockData: Sync + Send {
     fn data(&self) -> Vec<u8>;
     fn box_clone(&self) -> Box<BlockData>;
     fn debug(&self, f: &mut fmt::Formatter)-> fmt::Result;
 }
+
+graphql_object!(BlockData: () |&self|{
+    field data() -> Vec<u8> {
+        self.data()
+    }
+});
 
 impl Clone for Box<BlockData> {
     fn clone(&self) -> Box<BlockData> {
@@ -24,14 +37,40 @@ impl fmt::Debug for Box<BlockData> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Block {
     id: u64,
     timestamp: i64,
     nonce: u64,
-    prev_block_hash: Sha512Hash,
+    prev_block_hash: Sha256Hash,
     data: Vec<Box<BlockData>>,
 }
+
+graphql_object!(Block: () |&self|{
+    field id() -> i32 {
+        self.id as i32
+    }
+
+    field timestamp() -> i32 {
+        self.timestamp as i32
+    }
+
+    field nonce() -> i32 {
+        self.nonce as i32
+    }
+
+    field prev_block_hash() -> String {
+        let strs: Vec<String> =
+          self.prev_block_hash.iter()
+                               .map(|b| format!("{:02X}", b))
+                               .collect();
+        strs.join("")
+    }
+
+    field data() -> Vec<Box<BlockData>> {
+        self.data
+    }
+});
 
 impl Block {
     fn headers(&self) -> Vec<u8> {
@@ -43,8 +82,9 @@ impl Block {
         vec
     }
 
-    fn hash(&self) -> Sha512Hash {
-        let mut hasher = Sha512::default();
+    fn hash(&self) -> Sha256Hash {
+        let mut hasher = Sha256::new();
+        let mut hash = Sha256Hash::default();
 
         hasher.input(&self.headers());
 
@@ -52,10 +92,11 @@ impl Block {
             hasher.input(&elm.data());
         }
 
-        hasher.result().as_slice().to_owned()
+        hasher.result(&mut hash);
+        hash
     }
 
-    pub fn new(data: &Vec<Box<BlockData>>, prev_block_hash: Sha512Hash, id: u64) -> Self {
+    pub fn new(data: &Vec<Box<BlockData>>, prev_block_hash: Sha256Hash, id: u64) -> Self {
         Self {
             id,
             prev_block_hash,
@@ -67,7 +108,7 @@ impl Block {
 
     pub fn genesis() -> Self {
         Self::new(&vec![BinaryData::new(&b"Genesis block".to_vec()).box_clone()],
-                  Sha512Hash::default(), 0)
+                  Sha256Hash::default(), 0)
     }
 
     fn next_block(&self) -> Self {
@@ -90,10 +131,10 @@ pub fn convert_u64_to_u8_array(val: u64) -> [u8; 8] {
     ]
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 struct Transaction {
-    sender: u64,
-    recipient: u64,
+    sender: Sha256Hash,
+    recipient: Sha256Hash,
     amount: u64,
 }
 
@@ -101,8 +142,8 @@ impl BlockData for Transaction {
     fn data(&self) -> Vec<u8> {
         let mut data = vec![1 as u8];
 
-        data.extend_from_slice(&convert_u64_to_u8_array(self.sender));
-        data.extend_from_slice(&convert_u64_to_u8_array(self.recipient));
+        data.extend_from_slice(&self.sender);
+        data.extend_from_slice(&self.recipient);
         data.extend_from_slice(&convert_u64_to_u8_array(self.amount));
 
         data
@@ -115,16 +156,16 @@ impl BlockData for Transaction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 struct BinaryData {
     data: Vec<u8>
 }
 
 impl BinaryData {
-    pub fn new(data: &Vec<u8>) -> Self {
-        Self {
+    pub fn new(data: &Vec<u8>) -> Box<BlockData> {
+        std::boxed::Box::new(Self {
             data: data.to_owned().to_vec(),
-        }
+        })
     }
 }
 
@@ -159,15 +200,57 @@ impl Blockchain {
         }
     }
 
-    fn add_block(&self) {
+    fn add_block(&mut self) {
         let block: Block;
-        let last_block = self.blocks.last();
-        let block = last_block.next_block();
+        match self.blocks.last() {
+            Some(last_block) => {
+                block = last_block.next_block();
+            }
+            None => {
+                println!("No parent");
+                return;
+            }
+        }
         self.blocks.push(block);
     }
 }
 
+struct Context {
+    blockchain: Arc<Mutex<Blockchain>>,
+}
+impl juniper::Context for Context {}
+
+struct Query;
+
+graphql_object!(Query: Context |&self| {
+    field block(&executor, id: i32) -> juniper::FieldResult<Block> {
+        let context = executor.context();
+        Ok(context.blockchain.lock().unwrap().blocks[id as usize].clone())
+    }
+});
+
+type Schema = juniper::RootNode<'static, Query, juniper::EmptyMutation<Context>>;
+
+fn schema() -> Schema {
+    Schema::new(Query, juniper::EmptyMutation::new())
+}
+
 fn main() {
-    let chain = Blockchain::new();
-    println!("{:?}", chain);
+    let log = warp::log("warp_server");
+
+    let chain = Arc::new(Mutex::new(Blockchain::new()));
+    chain.lock().unwrap().add_block();
+
+    let state = warp::any().map(move || Context {
+        blockchain: chain.clone(),
+    });
+    let graphql_filter = juniper_warp::make_graphql_filter(schema(), state.boxed());
+
+    warp::serve(
+        warp::get2()
+            .and(warp::path("graphql"))
+            .and(juniper_warp::graphiql_handler("/graphql"))
+            .or(warp::path("graphql").and(graphql_filter))
+            .with(log),
+    ).run(([127,0,0,1], 3000));
 }
